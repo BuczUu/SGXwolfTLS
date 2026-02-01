@@ -1,0 +1,48 @@
+/* Enclave.edl - Data Distribution with TLS in Enclave */
+
+enclave {
+    include "sgx_trts.h"
+    include "sgx_key_exchange.h"
+    
+    trusted {
+        
+        /* Initialization of WolfSSL in enclave */
+        public sgx_status_t enclave_init(void);
+        
+        /* TLS session handling in enclave */
+        public sgx_status_t ecall_handle_tls_session(
+            int client_sockfd);
+        
+        /* Main aggregation function - receives data from multiple sources */
+        public sgx_status_t ecall_aggregate_data(
+            [in, string] const char* client_id,
+            [in, count=data_len] const uint8_t* data,
+            size_t data_len,
+            [out, size=1024] uint8_t* result,
+            [out] uint32_t* result_len);
+        
+        /* Process aggregated result */
+        public sgx_status_t ecall_process_and_return(
+            [out, size=2048] uint8_t* response,
+            [out] uint32_t* response_len);
+    };
+    
+    untrusted {
+        void ocall_print_string([in, string] const char* str);
+        
+        int ocall_read_socket(
+            int sockfd,
+            [out, size=len] uint8_t* buf,
+            size_t len);
+            
+        int ocall_write_socket(
+            int sockfd,
+            [in, size=len] const uint8_t* buf,
+            size_t len);
+            
+        int ocall_fetch_relay_data(
+            int relay_id,
+            [out, size=2048] uint8_t* buffer,
+            uint32_t buffer_size);
+    };
+};
