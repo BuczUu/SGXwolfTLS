@@ -187,10 +187,52 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
         ocall_print_string(msg);
 
         // Parse and process command
-        char response[2048];
+        char response[4096];
         int resp_len = 0;
 
-        if (strncmp((char *)buf, "SEND:", 5) == 0)
+        if (strcmp((char *)buf, "GET_DATA") == 0)
+        {
+            // GET_DATA command: fetch data from relay servers and aggregate
+            ocall_print_string("[ENCLAVE] GET_DATA: Fetching data from relay servers...\n");
+
+            resp_len = snprintf(response, sizeof(response),
+                                "=== AGGREGATED DATA FROM RELAY SERVERS ===\n\n");
+
+            // Fetch from relay 1
+            uint8_t relay_buffer[2048];
+            int relay1_len = 0;
+            ocall_fetch_relay_data(&relay1_len, 1, relay_buffer, sizeof(relay_buffer));
+            if (relay1_len > 0)
+            {
+                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
+                                     "[RELAY-1] Data (%d bytes):\n%.*s\n\n",
+                                     relay1_len, relay1_len, (char *)relay_buffer);
+            }
+            else
+            {
+                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
+                                     "[RELAY-1] No data or connection failed\n\n");
+            }
+
+            // Fetch from relay 2
+            int relay2_len = 0;
+            ocall_fetch_relay_data(&relay2_len, 2, relay_buffer, sizeof(relay_buffer));
+            if (relay2_len > 0)
+            {
+                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
+                                     "[RELAY-2] Data (%d bytes):\n%.*s\n\n",
+                                     relay2_len, relay2_len, (char *)relay_buffer);
+            }
+            else
+            {
+                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
+                                     "[RELAY-2] No data or connection failed\n\n");
+            }
+
+            resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
+                                 "[ENCLAVE] All data aggregated and encrypted in SGX!\n");
+        }
+        else if (strncmp((char *)buf, "SEND:", 5) == 0)
         {
             // SEND command: store data
             const char *data = (char *)buf + 5;

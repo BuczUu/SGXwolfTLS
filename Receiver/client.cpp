@@ -17,97 +17,14 @@
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 12345
 
-void *wolfSSL_Malloc_override(size_t size)
-{
-    return malloc(size);
-}
-
-void wolfSSL_Free_override(void *ptr)
-{
-    free(ptr);
-}
-
-void print_help()
-{
-    printf("\n=== Commands ===\n");
-    printf("  send <data>    - Send data to SGX enclave for aggregation\n");
-    printf("  query          - Query aggregated results from enclave\n");
-    printf("  status         - Get enclave status\n");
-    printf("  help           - Show this help\n");
-    printf("  exit           - Disconnect and exit\n");
-    printf("================\n\n");
-}
-
-int send_command(WOLFSSL *ssl, const char *cmd, const char *data)
-{
-    char buffer[2048];
-    int len;
-
-    if (strcmp(cmd, "send") == 0)
-    {
-        if (!data || strlen(data) == 0)
-        {
-            printf("[ERROR] send requires data: send <your_data>\n");
-            return -1;
-        }
-        len = snprintf(buffer, sizeof(buffer), "SEND:%s", data);
-    }
-    else if (strcmp(cmd, "query") == 0)
-    {
-        len = snprintf(buffer, sizeof(buffer), "QUERY");
-    }
-    else if (strcmp(cmd, "status") == 0)
-    {
-        len = snprintf(buffer, sizeof(buffer), "STATUS");
-    }
-    else
-    {
-        printf("[ERROR] Unknown command: %s\n", cmd);
-        return -1;
-    }
-
-    // Send size + data
-    uint32_t data_len = len;
-    int ret = wolfSSL_write(ssl, (unsigned char *)&data_len, 4);
-    if (ret != 4)
-    {
-        printf("[ERROR] Failed to send command size\n");
-        return -1;
-    }
-
-    ret = wolfSSL_write(ssl, (unsigned char *)buffer, data_len);
-    if (ret != (int)data_len)
-    {
-        printf("[ERROR] Failed to send command data\n");
-        return -1;
-    }
-
-    printf("[SENT] %s\n", buffer);
-
-    // Receive response
-    unsigned char result[2048];
-    ret = wolfSSL_read(ssl, result, sizeof(result) - 1);
-    if (ret > 0)
-    {
-        result[ret] = '\0';
-        printf("\n[RESPONSE]\n%s\n", (char *)result);
-        return 0;
-    }
-    else
-    {
-        printf("[ERROR] Failed to receive response (ret=%d)\n", ret);
-        return -1;
-    }
-}
-
 int main(int argc, char *argv[])
 {
-    printf("=== DistributionVC Interactive Receiver Client ===\n");
+    printf("=== DistributionVC Receiver Client (Simple) ===\n");
 
     const char *host = (argc > 1) ? argv[1] : SERVER_HOST;
     int port = (argc > 2) ? atoi(argv[2]) : SERVER_PORT;
 
-    printf("[RECEIVER] Connecting to %s:%d\n", host, port);
+    printf("[RECEIVER] Connecting to %s:%d via TLS...\n", host, port);
 
     wolfSSL_library_init();
 
@@ -145,7 +62,6 @@ int main(int argc, char *argv[])
     if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         printf("[RECEIVER] Failed to connect to server\n");
-        perror("connect");
         close(sock);
         return 1;
     }
@@ -188,10 +104,16 @@ int main(int argc, char *argv[])
     }
 
     printf("[RECEIVER] Connected to SGX enclave via TLS\n");
-    print_help();
+    printf("\n=== Commands ===\n");
+    printf("  fetch      - Fetch aggregated data from relay servers\n");
+    printf("  help       - Show this help\n");
+    printf("  exit       - Disconnect and exit\n");
+    printf("================\n\n");
 
     /* Interactive command loop */
     char input[1024];
+    unsigned char response[4096];
+
     while (1)
     {
         printf("receiver> ");
@@ -206,42 +128,58 @@ int main(int argc, char *argv[])
         if (strlen(input) == 0)
             continue;
 
-        // Parse command
-        char *cmd = strtok(input, " ");
-        if (!cmd)
-            continue;
-
-        if (strcmp(cmd, "exit") == 0)
+        if (strcmp(input, "exit") == 0)
         {
             printf("[RECEIVER] Exiting...\n");
             break;
         }
-        else if (strcmp(cmd, "help") == 0)
+        else if (strcmp(input, "help") == 0)
         {
-            print_help();
+            printf("\n=== Commands ===\n");
+            printf("  fetch      - Fetch aggregated data from relay servers\n");
+            printf("  help       - Show this help\n");
+            printf("  exit       - Disconnect and exit\n");
+            printf("================\n\n");
         }
-        else if (strcmp(cmd, "send") == 0)
+        else if (strcmp(input, "fetch") == 0)
         {
-            char *data = strtok(NULL, "");
-            send_command(ssl, "send", data);
-        }
-        else if (strcmp(cmd, "query") == 0)
-        {
-            send_command(ssl, "query", NULL);
-        }
-        else if (strcmp(cmd, "status") == 0)
-        {
-            send_command(ssl, "status", NULL);
+            /* Send GET_DATA command to SGX */
+            printf("[RECEIVER] Fetching data from SGX enclave...\n");
+            const char *cmd = "GET_DATA";
+            uint32_t cmd_len = strlen(cmd);
+
+            ret = wolfSSL_write(ssl, (unsigned char *)&cmd_len, 4);
+            if (ret != 4)
+            {
+                printf("[RECEIVER] Failed to send command size\n");
+                break;
+            }
+
+            ret = wolfSSL_write(ssl, (unsigned char *)cmd, cmd_len);
+            if (ret != (int)cmd_len)
+            {
+                printf("[RECEIVER] Failed to send command\n");
+                break;
+            }
+
+            /* Receive response with data from relay servers */
+            ret = wolfSSL_read(ssl, response, sizeof(response) - 1);
+            if (ret > 0)
+            {
+                response[ret] = '\0';
+                printf("\n[RECEIVED FROM SGX]:\n");
+                printf("%s\n\n", (char *)response);
+            }
+            else
+            {
+                printf("[RECEIVER] Failed to receive response (ret=%d)\n", ret);
+            }
         }
         else
         {
-            printf("[ERROR] Unknown command: %s (type 'help' for commands)\n", cmd);
+            printf("[RECEIVER] Unknown command: '%s' (type 'help' for commands)\n", input);
         }
     }
-
-    /* Send exit signal: 0xFFFFFFFF */
-    uint32_t exit_signal = 0xFFFFFFFF;
-    wolfSSL_write(ssl, (unsigned char *)&exit_signal, 4);
 
     wolfSSL_shutdown(ssl);
     wolfSSL_free(ssl);

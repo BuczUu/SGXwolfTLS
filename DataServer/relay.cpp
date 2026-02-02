@@ -15,16 +15,30 @@
 #include <wolfssl/ssl.h>
 #include <wolfssl/certs_test.h>
 
-/* Data for each relay */
-const char *RELAY_DATA_1 = "Data from Relay 1: sensor_value=42.5, timestamp=2026-02-01";
-const char *RELAY_DATA_2 = "Data from Relay 2: sensor_value=37.2, timestamp=2026-02-01";
+/* Data for each relay - list of data items */
+const char *RELAY_DATA_LIST_1[] = {
+    "Data from Relay 1 [0]: sensor_value=42.5, timestamp=2026-02-01",
+    "Data from Relay 1 [1]: sensor_value=42.7, timestamp=2026-02-02",
+    "Data from Relay 1 [2]: sensor_value=43.1, timestamp=2026-02-03",
+    "Data from Relay 1 [3]: sensor_value=42.9, timestamp=2026-02-04",
+};
+const int RELAY_DATA_COUNT_1 = sizeof(RELAY_DATA_LIST_1) / sizeof(RELAY_DATA_LIST_1[0]);
+
+const char *RELAY_DATA_LIST_2[] = {
+    "Data from Relay 2 [0]: sensor_value=37.2, timestamp=2026-02-01",
+    "Data from Relay 2 [1]: sensor_value=37.4, timestamp=2026-02-02",
+    "Data from Relay 2 [2]: sensor_value=37.0, timestamp=2026-02-03",
+    "Data from Relay 2 [3]: sensor_value=37.6, timestamp=2026-02-04",
+};
+const int RELAY_DATA_COUNT_2 = sizeof(RELAY_DATA_LIST_2) / sizeof(RELAY_DATA_LIST_2[0]);
 
 typedef struct
 {
     WOLFSSL *ssl;
     int client_sock;
     int relay_id;
-    const char *relay_data;
+    const char **relay_data_list;
+    int data_count;
 } client_context_t;
 
 void *handle_client(void *arg)
@@ -32,12 +46,13 @@ void *handle_client(void *arg)
     client_context_t *ctx = (client_context_t *)arg;
     WOLFSSL *ssl = ctx->ssl;
     int relay_id = ctx->relay_id;
-    const char *relay_data = ctx->relay_data;
+    const char **relay_data_list = ctx->relay_data_list;
+    int data_count = ctx->data_count;
     int ret;
     unsigned char size_bytes[4];
     uint32_t request_size;
     unsigned char request[2048];
-    uint32_t response_len;
+    int request_index = 0;
 
     printf("[RELAY-%d] Client connected\n", relay_id);
 
@@ -54,46 +69,71 @@ void *handle_client(void *arg)
 
     printf("[RELAY-%d] TLS handshake OK\n", relay_id);
 
-    /* Receive request: [size:4][data] */
-    ret = wolfSSL_read(ssl, size_bytes, 4);
-    if (ret != 4)
+    /* Main loop - handle multiple requests from client */
+    while (1)
     {
-        printf("[RELAY-%d] Failed to read request size\n", relay_id);
-        goto cleanup;
-    }
-
-    request_size = *(uint32_t *)size_bytes;
-    printf("[RELAY-%d] Received request header (size=%u)\n", relay_id, request_size);
-
-    if (request_size > 0 && request_size < 2048)
-    {
-        ret = wolfSSL_read(ssl, request, request_size);
-        if (ret > 0)
+        /* Receive request: [size:4][data] */
+        ret = wolfSSL_read(ssl, size_bytes, 4);
+        if (ret <= 0)
         {
-            request[ret] = '\0';
-            printf("[RELAY-%d] Request: %s\n", relay_id, (char *)request);
+            printf("[RELAY-%d] Client disconnected or read failed\n", relay_id);
+            break;
+        }
+
+        request_size = *(uint32_t *)size_bytes;
+        printf("[RELAY-%d] Received request #%d (size=%u)\n", relay_id, request_index + 1, request_size);
+
+        if (request_size > 0 && request_size < 2048)
+        {
+            ret = wolfSSL_read(ssl, request, request_size);
+            if (ret > 0)
+            {
+                request[ret] = '\0';
+                printf("[RELAY-%d] Request data: %s\n", relay_id, (char *)request);
+            }
+        }
+
+        /* Send response: [size:4][data from list] */
+        const char *response_data;
+        uint32_t response_len;
+
+        if (request_index < data_count)
+        {
+            response_data = relay_data_list[request_index];
+            response_len = strlen(response_data);
+            printf("[RELAY-%d] Sending response #%d (%u bytes)\n", relay_id, request_index + 1, response_len);
+        }
+        else
+        {
+            response_data = "No more data available";
+            response_len = strlen(response_data);
+            printf("[RELAY-%d] All data exhausted, sending end message\n", relay_id);
+        }
+
+        ret = wolfSSL_write(ssl, (unsigned char *)&response_len, 4);
+        if (ret != 4)
+        {
+            printf("[RELAY-%d] Failed to send response size\n", relay_id);
+            break;
+        }
+
+        ret = wolfSSL_write(ssl, (unsigned char *)response_data, response_len);
+        if (ret != (int)response_len)
+        {
+            printf("[RELAY-%d] Failed to send response data\n", relay_id);
+            break;
+        }
+
+        printf("[RELAY-%d] Response #%d sent\n", relay_id, request_index + 1);
+        request_index++;
+
+        /* If all data sent, close connection */
+        if (request_index >= data_count)
+        {
+            printf("[RELAY-%d] All data sent, closing connection\n", relay_id);
+            break;
         }
     }
-
-    /* Send response: [size:4][data] */
-    response_len = strlen(relay_data);
-    printf("[RELAY-%d] Sending response (%u bytes)\n", relay_id, response_len);
-
-    ret = wolfSSL_write(ssl, (unsigned char *)&response_len, 4);
-    if (ret != 4)
-    {
-        printf("[RELAY-%d] Failed to send response size\n", relay_id);
-        goto cleanup;
-    }
-
-    ret = wolfSSL_write(ssl, (unsigned char *)relay_data, response_len);
-    if (ret != (int)response_len)
-    {
-        printf("[RELAY-%d] Failed to send response data\n", relay_id);
-        goto cleanup;
-    }
-
-    printf("[RELAY-%d] Response sent\n", relay_id);
 
 cleanup:
     wolfSSL_shutdown(ssl);
@@ -104,7 +144,7 @@ cleanup:
     return NULL;
 }
 
-int start_relay_server(int relay_id, int port, const char *relay_data)
+int start_relay_server(int relay_id, int port, const char **relay_data_list, int data_count)
 {
     printf("[RELAY-%d] Starting on port %d\n", relay_id, port);
 
@@ -199,7 +239,8 @@ int start_relay_server(int relay_id, int port, const char *relay_data)
         ctx->ssl = ssl;
         ctx->client_sock = client_sock;
         ctx->relay_id = relay_id;
-        ctx->relay_data = relay_data;
+        ctx->relay_data_list = relay_data_list;
+        ctx->data_count = data_count;
 
         pthread_t thread;
         pthread_create(&thread, NULL, handle_client, ctx);
@@ -215,15 +256,25 @@ int main(int argc, char *argv[])
 {
     int relay_id = 1;
     int port = 13001;
-    const char *relay_data = RELAY_DATA_1;
+    const char **relay_data_list = RELAY_DATA_LIST_1;
+    int data_count = RELAY_DATA_COUNT_1;
 
     if (argc > 1)
     {
         relay_id = atoi(argv[1]);
         port = 13000 + relay_id;
-        relay_data = (relay_id == 1) ? RELAY_DATA_1 : RELAY_DATA_2;
+        if (relay_id == 1)
+        {
+            relay_data_list = RELAY_DATA_LIST_1;
+            data_count = RELAY_DATA_COUNT_1;
+        }
+        else
+        {
+            relay_data_list = RELAY_DATA_LIST_2;
+            data_count = RELAY_DATA_COUNT_2;
+        }
     }
 
     printf("=== DistributionVC Data Relay Server (WolfTLS) ===\n");
-    return start_relay_server(relay_id, port, relay_data);
+    return start_relay_server(relay_id, port, relay_data_list, data_count);
 }
