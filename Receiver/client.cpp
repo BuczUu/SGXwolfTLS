@@ -136,16 +136,16 @@ int main(int argc, char *argv[])
         else if (strcmp(input, "help") == 0)
         {
             printf("\n=== Commands ===\n");
-            printf("  fetch      - Fetch aggregated data from relay servers\n");
+            printf("  fetch      - Fetch + decrypt from relay servers\n");
             printf("  help       - Show this help\n");
             printf("  exit       - Disconnect and exit\n");
             printf("================\n\n");
         }
         else if (strcmp(input, "fetch") == 0)
         {
-            /* Send GET_DATA command to SGX */
-            printf("[RECEIVER] Fetching data from SGX enclave...\n");
-            const char *cmd = "GET_DATA";
+            /* Send FETCH command to SGX */
+            printf("[RECEIVER] Fetching + decrypting data from SGX enclave...\n");
+            const char *cmd = "FETCH";
             uint32_t cmd_len = strlen(cmd);
 
             ret = wolfSSL_write(ssl, (unsigned char *)&cmd_len, 4);

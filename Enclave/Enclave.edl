@@ -39,10 +39,12 @@ enclave {
             int sockfd,
             [in, size=len] const uint8_t* buf,
             size_t len);
-            
-        int ocall_fetch_relay_data(
+
+        int ocall_connect_relay(
             int relay_id,
-            [out, size=2048] uint8_t* buffer,
-            uint32_t buffer_size);
+            [out] int* sockfd);
+
+        void ocall_close_socket(
+            int sockfd);
     };
 };
