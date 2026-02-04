@@ -6,13 +6,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Enable 1024-bit certificate buffers before including certs_test.h */
-#define USE_CERT_BUFFERS_1024
-
 /* WolfSSL must be included after standard headers */
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
-#include <wolfssl/certs_test.h>
+#include "mtls_certs_pem.h"
 
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 12345
@@ -36,8 +33,43 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Disable certificate verification for testing */
-    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    /* Enable certificate verification (mTLS) */
+    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+
+    /* Load CA certificate */
+    int ret = wolfSSL_CTX_load_verify_buffer(ctx,
+                                             (const unsigned char *)DVC_CA_CERT_PEM,
+                                             (int)strlen(DVC_CA_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
+    if (ret != WOLFSSL_SUCCESS)
+    {
+        printf("[RECEIVER] Failed to load CA certificate\n");
+        wolfSSL_CTX_free(ctx);
+        return 1;
+    }
+
+    /* Load client certificate and key */
+    ret = wolfSSL_CTX_use_certificate_buffer(ctx,
+                                             (const unsigned char *)DVC_RECEIVER_CERT_PEM,
+                                             (int)strlen(DVC_RECEIVER_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
+    if (ret != WOLFSSL_SUCCESS)
+    {
+        printf("[RECEIVER] Failed to load client certificate\n");
+        wolfSSL_CTX_free(ctx);
+        return 1;
+    }
+
+    ret = wolfSSL_CTX_use_PrivateKey_buffer(ctx,
+                                            (const unsigned char *)DVC_RECEIVER_KEY_PEM,
+                                            (int)strlen(DVC_RECEIVER_KEY_PEM),
+                                            SSL_FILETYPE_PEM);
+    if (ret != WOLFSSL_SUCCESS)
+    {
+        printf("[RECEIVER] Failed to load client key\n");
+        wolfSSL_CTX_free(ctx);
+        return 1;
+    }
 
     /* Create socket and connect to server */
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -80,7 +112,7 @@ int main(int argc, char *argv[])
     wolfSSL_set_fd(ssl, sock);
 
     /* TLS handshake */
-    int ret = wolfSSL_connect(ssl);
+    ret = wolfSSL_connect(ssl);
     if (ret != WOLFSSL_SUCCESS)
     {
         int err = wolfSSL_get_error(ssl, ret);

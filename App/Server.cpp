@@ -9,14 +9,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Enable 1024-bit certificate buffers before including certs_test.h */
-#define USE_CERT_BUFFERS_1024
-
-/* WolfSSL must be included after standard headers */
-#include <wolfssl/options.h>
-#include <wolfssl/ssl.h>
-#include <wolfssl/certs_test.h>
-
 #include "Enclave_u.h"
 #include "sgx_urts.h"
 

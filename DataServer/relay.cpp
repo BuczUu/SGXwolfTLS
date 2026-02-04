@@ -7,13 +7,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* Enable 1024-bit certificate buffers before including certs_test.h */
-#define USE_CERT_BUFFERS_1024
-
 /* WolfSSL must be included after standard headers */
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
-#include <wolfssl/certs_test.h>
+#include "mtls_certs_pem.h"
 
 /* Data for each relay - list of data items */
 const char *RELAY_DATA_LIST_1[] = {
@@ -114,6 +111,57 @@ typedef struct
     const char **relay_data_list;
     int data_count;
 } client_context_t;
+
+static void get_relay_cert_key(int relay_id, const char **cert, const char **key)
+{
+    switch (relay_id)
+    {
+    case 1:
+        *cert = DVC_RELAY_1_CERT_PEM;
+        *key = DVC_RELAY_1_KEY_PEM;
+        break;
+    case 2:
+        *cert = DVC_RELAY_2_CERT_PEM;
+        *key = DVC_RELAY_2_KEY_PEM;
+        break;
+    case 3:
+        *cert = DVC_RELAY_3_CERT_PEM;
+        *key = DVC_RELAY_3_KEY_PEM;
+        break;
+    case 4:
+        *cert = DVC_RELAY_4_CERT_PEM;
+        *key = DVC_RELAY_4_KEY_PEM;
+        break;
+    case 5:
+        *cert = DVC_RELAY_5_CERT_PEM;
+        *key = DVC_RELAY_5_KEY_PEM;
+        break;
+    case 6:
+        *cert = DVC_RELAY_6_CERT_PEM;
+        *key = DVC_RELAY_6_KEY_PEM;
+        break;
+    case 7:
+        *cert = DVC_RELAY_7_CERT_PEM;
+        *key = DVC_RELAY_7_KEY_PEM;
+        break;
+    case 8:
+        *cert = DVC_RELAY_8_CERT_PEM;
+        *key = DVC_RELAY_8_KEY_PEM;
+        break;
+    case 9:
+        *cert = DVC_RELAY_9_CERT_PEM;
+        *key = DVC_RELAY_9_KEY_PEM;
+        break;
+    case 10:
+        *cert = DVC_RELAY_10_CERT_PEM;
+        *key = DVC_RELAY_10_KEY_PEM;
+        break;
+    default:
+        *cert = DVC_RELAY_1_CERT_PEM;
+        *key = DVC_RELAY_1_KEY_PEM;
+        break;
+    }
+}
 
 // Global request index per relay (1-10). Persists across connections.
 static int g_relay_request_index[11] = {0};
@@ -244,15 +292,38 @@ int start_relay_server(int relay_id, int port, const char **relay_data_list, int
         return 1;
     }
 
-    /* Load test certificates */
-    int ret = wolfSSL_CTX_use_certificate_buffer(ssl_ctx, server_cert_der_1024, sizeof(server_cert_der_1024), SSL_FILETYPE_ASN1);
+    /* Load CA certificate and require client cert (mTLS) */
+    int ret = wolfSSL_CTX_load_verify_buffer(ssl_ctx,
+                                             (const unsigned char *)DVC_CA_CERT_PEM,
+                                             (int)strlen(DVC_CA_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
+    if (ret != WOLFSSL_SUCCESS)
+    {
+        printf("[RELAY-%d] Failed to load CA certificate\n", relay_id);
+        return 1;
+    }
+    wolfSSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+
+    const char *relay_cert = NULL;
+    const char *relay_key = NULL;
+    get_relay_cert_key(relay_id, &relay_cert, &relay_key);
+
+    /* Load relay certificate */
+    ret = wolfSSL_CTX_use_certificate_buffer(ssl_ctx,
+                                             (const unsigned char *)relay_cert,
+                                             (int)strlen(relay_cert),
+                                             SSL_FILETYPE_PEM);
     if (ret != WOLFSSL_SUCCESS)
     {
         printf("[RELAY-%d] Failed to load certificate\n", relay_id);
         return 1;
     }
 
-    ret = wolfSSL_CTX_use_PrivateKey_buffer(ssl_ctx, server_key_der_1024, sizeof(server_key_der_1024), SSL_FILETYPE_ASN1);
+    /* Load relay private key */
+    ret = wolfSSL_CTX_use_PrivateKey_buffer(ssl_ctx,
+                                            (const unsigned char *)relay_key,
+                                            (int)strlen(relay_key),
+                                            SSL_FILETYPE_PEM);
     if (ret != WOLFSSL_SUCCESS)
     {
         printf("[RELAY-%d] Failed to load private key\n", relay_id);

@@ -4,11 +4,10 @@
 #include "Enclave_t.h"
 #include "sgx_trts.h"
 
-#define USE_CERT_BUFFERS_1024
 #include <wolfssl/wolfcrypt/settings.h>
 #include <wolfssl/ssl.h>
-#include <wolfssl/certs_test.h>
 #include <wolfssl/wolfcrypt/integer.h>
+#include "Include/mtls_certs_pem.h"
 
 // Provide recv/send stubs for WolfSSL (it expects these but we use custom I/O)
 extern "C" int recv(int sockfd, void *buf, size_t len, int flags)
@@ -557,11 +556,25 @@ sgx_status_t enclave_init()
         return SGX_ERROR_UNEXPECTED;
     }
 
-    // Load server certificate and key from test buffers
-    int ret = wolfSSL_CTX_use_certificate_buffer(g_wolfssl_ctx,
-                                                 server_cert_der_1024,
-                                                 sizeof(server_cert_der_1024),
-                                                 SSL_FILETYPE_ASN1);
+    // Load CA for client certificate verification (mTLS)
+    int ret = wolfSSL_CTX_load_verify_buffer(g_wolfssl_ctx,
+                                             (const unsigned char *)DVC_CA_CERT_PEM,
+                                             (int)strlen(DVC_CA_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
+    if (ret != SSL_SUCCESS)
+    {
+        ocall_print_string("[ENCLAVE] Failed to load CA certificate\n");
+        return SGX_ERROR_UNEXPECTED;
+    }
+
+    // Require client certificate
+    wolfSSL_CTX_set_verify(g_wolfssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+
+    // Load server certificate and key (mTLS)
+    ret = wolfSSL_CTX_use_certificate_buffer(g_wolfssl_ctx,
+                                             (const unsigned char *)DVC_ENCLAVE_CERT_PEM,
+                                             (int)strlen(DVC_ENCLAVE_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
     if (ret != SSL_SUCCESS)
     {
         ocall_print_string("[ENCLAVE] Failed to load certificate\n");
@@ -569,9 +582,9 @@ sgx_status_t enclave_init()
     }
 
     ret = wolfSSL_CTX_use_PrivateKey_buffer(g_wolfssl_ctx,
-                                            server_key_der_1024,
-                                            sizeof(server_key_der_1024),
-                                            SSL_FILETYPE_ASN1);
+                                            (const unsigned char *)DVC_ENCLAVE_KEY_PEM,
+                                            (int)strlen(DVC_ENCLAVE_KEY_PEM),
+                                            SSL_FILETYPE_PEM);
     if (ret != SSL_SUCCESS)
     {
         ocall_print_string("[ENCLAVE] Failed to load private key\n");
@@ -585,7 +598,38 @@ sgx_status_t enclave_init()
         ocall_print_string("[ENCLAVE] Failed to create relay TLS context\n");
         return SGX_ERROR_UNEXPECTED;
     }
-    wolfSSL_CTX_set_verify(g_wolfssl_relay_ctx, SSL_VERIFY_NONE, NULL);
+    // Load CA for relay verification and set client cert (mTLS)
+    ret = wolfSSL_CTX_load_verify_buffer(g_wolfssl_relay_ctx,
+                                         (const unsigned char *)DVC_CA_CERT_PEM,
+                                         (int)strlen(DVC_CA_CERT_PEM),
+                                         SSL_FILETYPE_PEM);
+    if (ret != SSL_SUCCESS)
+    {
+        ocall_print_string("[ENCLAVE] Failed to load relay CA certificate\n");
+        return SGX_ERROR_UNEXPECTED;
+    }
+
+    ret = wolfSSL_CTX_use_certificate_buffer(g_wolfssl_relay_ctx,
+                                             (const unsigned char *)DVC_ENCLAVE_CERT_PEM,
+                                             (int)strlen(DVC_ENCLAVE_CERT_PEM),
+                                             SSL_FILETYPE_PEM);
+    if (ret != SSL_SUCCESS)
+    {
+        ocall_print_string("[ENCLAVE] Failed to load relay client certificate\n");
+        return SGX_ERROR_UNEXPECTED;
+    }
+
+    ret = wolfSSL_CTX_use_PrivateKey_buffer(g_wolfssl_relay_ctx,
+                                            (const unsigned char *)DVC_ENCLAVE_KEY_PEM,
+                                            (int)strlen(DVC_ENCLAVE_KEY_PEM),
+                                            SSL_FILETYPE_PEM);
+    if (ret != SSL_SUCCESS)
+    {
+        ocall_print_string("[ENCLAVE] Failed to load relay client key\n");
+        return SGX_ERROR_UNEXPECTED;
+    }
+
+    wolfSSL_CTX_set_verify(g_wolfssl_relay_ctx, SSL_VERIFY_PEER, NULL);
 
     ocall_print_string("[ENCLAVE] WolfSSL initialized successfully with certificates\n");
     return SGX_SUCCESS;
@@ -789,129 +833,6 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
                                     DEGREE + 1, g_agg_count);
             }
         }
-        else if (strcmp((char *)buf, "GET_DATA") == 0)
-        {
-            // GET_DATA command: fetch data from relay servers and aggregate
-            ocall_print_string("[ENCLAVE] GET_DATA: Fetching data from relay servers...\n");
-
-            resp_len = snprintf(response, sizeof(response),
-                                "=== AGGREGATED DATA FROM RELAY SERVERS ===\n\n");
-
-            // Fetch from all relay servers (1-10)
-            uint8_t relay_buffer[2048];
-            int fetched_count = 0;
-
-            for (int relay_id = 1; relay_id <= 10; relay_id++)
-            {
-                int relay_len = 0;
-                int fetch_ret = fetch_relay_data_tls(relay_id, relay_buffer, sizeof(relay_buffer), &relay_len);
-                if (fetch_ret == 0 && relay_len > 0)
-                {
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "[RELAY-%d] Data (%d bytes):\n%.*s\n\n",
-                                         relay_id, relay_len, relay_len, (char *)relay_buffer);
-                    fetched_count++;
-                }
-                else
-                {
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "[RELAY-%d] No data or connection failed\n\n",
-                                         relay_id);
-                }
-            }
-
-            resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                 "[ENCLAVE] Data aggregated from %d/%d relay servers (encrypted in SGX)\n",
-                                 fetched_count, 10);
-        }
-        else if (strcmp((char *)buf, "DECRYPT") == 0)
-        {
-            // DECRYPT command: perform threshold Paillier decryption on aggregated data
-            ocall_print_string("[ENCLAVE] DECRYPT: Performing threshold decryption...\n");
-
-            resp_len = snprintf(response, sizeof(response),
-                                "=== THRESHOLD PAILLIER DECRYPTION ===\n\n");
-
-            // Check if we have enough partial decryptions
-            if (g_agg_count < DEGREE + 1)
-            {
-                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                     "[ENCLAVE] Error: Not enough partial decryptions (%d, need %d)\n",
-                                     g_agg_count, DEGREE + 1);
-            }
-            else
-            {
-                // Prepare array of partial share strings
-                const char *partial_shares[MAX_SERVERS];
-                for (int i = 0; i < g_agg_count && i < MAX_SERVERS; i++)
-                {
-                    partial_shares[i] = (const char *)g_aggregated[i].data;
-                }
-
-                // Perform threshold decryption
-                char decrypted_result[1024];
-                int decrypt_ret = threshold_paillier_decrypt(partial_shares, g_agg_count,
-                                                             decrypted_result, sizeof(decrypted_result));
-
-                if (decrypt_ret == MP_OKAY)
-                {
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "Partial decryptions used: %d\n", DEGREE + 1);
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "Degree: %d\n\n", DEGREE);
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "DECRYPTED MESSAGE:\n%s\n\n",
-                                         decrypted_result);
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "[ENCLAVE] Threshold decryption successful!\n");
-                }
-                else
-                {
-                    resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                         "[ENCLAVE] Threshold decryption failed (error: %d)\n",
-                                         decrypt_ret);
-                }
-            }
-        }
-        else if (strncmp((char *)buf, "SEND:", 5) == 0)
-        {
-            // SEND command: store data
-            const char *data = (char *)buf + 5;
-            if (g_agg_count < MAX_SERVERS)
-            {
-                snprintf(g_aggregated[g_agg_count].server_id, 64, "CLIENT_%d", g_agg_count);
-                size_t data_len = strlen(data);
-                if (data_len > 512)
-                    data_len = 512;
-                memcpy(g_aggregated[g_agg_count].data, data, data_len);
-                g_aggregated[g_agg_count].data_len = data_len;
-                g_agg_count++;
-
-                resp_len = snprintf(response, sizeof(response),
-                                    "[ENCLAVE] Data stored (%zu bytes). Total: %d entries",
-                                    data_len, g_agg_count);
-            }
-            else
-            {
-                resp_len = snprintf(response, sizeof(response),
-                                    "[ENCLAVE] Storage full! Cannot store more data.");
-            }
-        }
-        else if (strcmp((char *)buf, "QUERY") == 0)
-        {
-            // QUERY command: return aggregated data
-            resp_len = snprintf(response, sizeof(response),
-                                "[ENCLAVE] Aggregated Data (%d entries):\n", g_agg_count);
-            for (int i = 0; i < g_agg_count && resp_len < 1900; i++)
-            {
-                resp_len += snprintf(response + resp_len, sizeof(response) - resp_len,
-                                     "  [%d] %s: %.*s (%u bytes)\n",
-                                     i + 1, g_aggregated[i].server_id,
-                                     (int)g_aggregated[i].data_len,
-                                     (char *)g_aggregated[i].data,
-                                     g_aggregated[i].data_len);
-            }
-        }
         else if (strcmp((char *)buf, "STATUS") == 0)
         {
             // STATUS command
@@ -941,113 +862,5 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
     wolfSSL_free(ssl);
 
     ocall_print_string("[ENCLAVE] TLS session completed\n");
-    return SGX_SUCCESS;
-}
-
-sgx_status_t ecall_aggregate_data(
-    const char *client_id,
-    const uint8_t *data,
-    size_t data_len,
-    uint8_t *result,
-    uint32_t *result_len)
-{
-
-    char msg[256];
-    snprintf(msg, sizeof(msg), "[ENCLAVE] Aggregating data from %s (%zu bytes)\n",
-             client_id, data_len);
-    ocall_print_string(msg);
-
-    if (g_agg_count < MAX_SERVERS)
-    {
-        strncpy(g_aggregated[g_agg_count].server_id, client_id, 63);
-        g_aggregated[g_agg_count].server_id[63] = '\0';
-
-        if (data_len > 512)
-            data_len = 512;
-        memcpy(g_aggregated[g_agg_count].data, data, data_len);
-        g_aggregated[g_agg_count].data_len = data_len;
-        g_agg_count++;
-    }
-
-    // Return confirmation
-    snprintf((char *)result, 1024, "ACK:%s:%zu", client_id, data_len);
-    *result_len = strlen((char *)result);
-
-    return SGX_SUCCESS;
-}
-
-sgx_status_t ecall_process_and_return(
-    uint8_t *response,
-    uint32_t *response_len)
-{
-
-    ocall_print_string("[ENCLAVE] Processing aggregated data...\n");
-    ocall_print_string("[ENCLAVE] Fetching data from relay servers...\n");
-
-    // Fetch data from all relay servers (1-10)
-    uint8_t relay_buffer[2048];
-
-    for (int relay_id = 1; relay_id <= 10 && g_agg_count < MAX_AGG_DATA; relay_id++)
-    {
-        int relay_len = 0;
-        int fetch_ret = fetch_relay_data_tls(relay_id, relay_buffer, sizeof(relay_buffer), &relay_len);
-        if (fetch_ret == 0 && relay_len > 0)
-        {
-            char relay_id_str[64];
-            snprintf(relay_id_str, sizeof(relay_id_str), "RELAY_%d", relay_id);
-            strncpy(g_aggregated[g_agg_count].server_id, relay_id_str, 63);
-            g_aggregated[g_agg_count].server_id[63] = '\0';
-            memcpy(g_aggregated[g_agg_count].data, relay_buffer, relay_len);
-            g_aggregated[g_agg_count].data_len = relay_len;
-            g_agg_count++;
-        }
-    }
-
-    // Build response from aggregated data
-    char *resp = (char *)response;
-    int offset = 0;
-
-    offset += snprintf(resp + offset, 2048 - offset, "[RESULT] Aggregated data from %d sources:\n", g_agg_count);
-
-    for (int i = 0; i < g_agg_count; i++)
-    {
-        offset += snprintf(resp + offset, 2048 - offset, "  %s: %d bytes\n",
-                           g_aggregated[i].server_id, g_aggregated[i].data_len);
-    }
-
-    // Perform threshold decryption if we have enough shares
-    if (g_agg_count >= DEGREE + 1)
-    {
-        offset += snprintf(resp + offset, 2048 - offset, "\n[ENCLAVE] Performing threshold decryption...\n");
-
-        const char *partial_shares[MAX_SERVERS];
-        for (int i = 0; i < g_agg_count && i < MAX_SERVERS; i++)
-        {
-            partial_shares[i] = (const char *)g_aggregated[i].data;
-        }
-
-        char decrypted_result[1024];
-        int decrypt_ret = threshold_paillier_decrypt(partial_shares, g_agg_count,
-                                                     decrypted_result, sizeof(decrypted_result));
-
-        if (decrypt_ret == MP_OKAY)
-        {
-            offset += snprintf(resp + offset, 2048 - offset,
-                               "DECRYPTED MESSAGE: %s\n", decrypted_result);
-        }
-        else
-        {
-            offset += snprintf(resp + offset, 2048 - offset,
-                               "Decryption failed (error: %d)\n", decrypt_ret);
-        }
-    }
-    else
-    {
-        offset += snprintf(resp + offset, 2048 - offset,
-                           "\n[ENCLAVE] Not enough shares for decryption (%d, need %d)\n",
-                           g_agg_count, DEGREE + 1);
-    }
-
-    *response_len = offset;
     return SGX_SUCCESS;
 }
