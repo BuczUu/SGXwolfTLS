@@ -55,6 +55,159 @@ static const int SPLIT_B = 5;
 static const size_t MAX_PREFIX_LEN = 256;
 static const size_t MAX_BUCKET_LEN = 256;
 
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+// Twoja struktura danych
+typedef struct {
+    char voteSerial[MAX_BUCKET_LEN];
+	char orginalPerm[5][MAX_BUCKET_LEN];
+	char permuted[5][MAX_BUCKET_LEN];
+	bool used;
+} VoteData;
+
+// Globalna mapa wewnątrz enklawy (dostępna dla funkcji ECALL)
+std::unordered_map<std::string, VoteData> enclave_registry;
+
+#include <wolfssl/wolfcrypt/random.h>
+
+void print_enclave_map() {
+    char buffer[2048]; // Bufor na sformatowany tekst
+    size_t offset = 0;
+
+    // Nagłówek logu
+    offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                       "\n--- [ENCLAVE MAP DUMP] Size: %zu ---\n", enclave_registry.size());
+
+    if (enclave_registry.empty()) {
+        ocall_print_string("[ENCLAVE] Map is empty.\n");
+        return;
+    }
+
+    // Iteracja po mapie
+    for (auto const& [key, vd] : enclave_registry) {
+        // Sprawdzamy czy mamy miejsce na kolejny wpis (ok. 150 znaków)
+        if (offset + 150 > sizeof(buffer)) {
+            ocall_print_string(buffer); // Wypisz to co już mamy
+            offset = 0;                 // Resetuj bufor
+            buffer[0] = '\0';
+        }
+
+        // Formatowanie pojedynczego wpisu (Key + pierwsze 2 kubełki)
+        offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                           "KEY: %s | P0: %s | P1: %s\n",
+                           key.c_str(),
+                           vd.permuted[0],
+                           vd.permuted[1]);
+    }
+
+    // Dodanie stopki i końcowy print
+    snprintf(buffer + offset, sizeof(buffer) - offset, "--- [END DUMP] ---\n\n");
+    ocall_print_string(buffer);
+}
+
+std::string getRandomKey() {
+    if (enclave_registry.empty()) {
+        return ""; // Zabezpieczenie przed pustą mapą
+    }
+
+    // 1. Pobierz rozmiar mapy
+    size_t map_size = enclave_registry.size();
+
+    // 2. Wylosuj indeks (używając bezpiecznej losowości SGX)
+    size_t random_index;
+    sgx_read_rand(reinterpret_cast<uint8_t*>(&random_index), sizeof(random_index));
+    random_index = random_index % map_size;
+
+    // 3. Przesuń iterator na wylosowaną pozycję
+    auto it = enclave_registry.begin();
+    std::advance(it, random_index);
+
+    // it->first to klucz (string), it->second to wartość (VoteData)
+    return it->first;
+}
+
+static void getMapping(uint8_t mapping[5], VoteData* vd) {
+    for (int i = 0; i < 5; i++) {
+        mapping[i] = 255;
+
+        for (int j = 0; j < 5; j++) {
+            if (strncmp(vd->permuted[i], vd->orginalPerm[j], 10) == 0) {
+                mapping[i] = (uint8_t)j;
+                break;
+            }
+        }
+    }
+}
+
+static uint8_t getRandomByte() {
+    WC_RNG rng;
+    uint8_t one_byte = 0;
+
+    if (wc_InitRng(&rng) == 0) {
+        // Generujemy dokładnie 1 bajt
+        wc_RNG_GenerateBlock(&rng, &one_byte, 1);
+        wc_FreeRng(&rng);
+    }
+
+    return one_byte;
+}
+
+static bool has10AlnumAfterStatus(const char* buf) {
+    // 2. Sprawdź czy kolejne 10 znaków (od indeksu 6 do 15) są alfanumeryczne
+    for (int i = 0; i < 10; i++) {
+        if (!isalnum(static_cast<unsigned char>(buf[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#include <algorithm>
+
+static void secureShuffle(VoteData* vd) {
+    // 1. Kopiujemy oryginał do pola permuted
+    for (int i = 0; i < 5; i++) {
+        memcpy(vd->permuted[i], vd->orginalPerm[i], 10);
+    }
+
+    // 2. Fisher-Yates Shuffle
+    char temp[10]; // Bufor pomocniczy do zamiany
+    for (int i = 4; i > 0; i--) {
+        uint8_t j = getRandomByte() % (i + 1);
+
+        if (i != j) {
+            // Ręczny swap tablic char[10]
+            memcpy(temp, vd->permuted[i], 10);
+            memcpy(vd->permuted[i], vd->permuted[j], 10);
+            memcpy(vd->permuted[j], temp, 10);
+        }
+    }
+}
+
+static void store_vote(const std::string& prefix, const char buckets[5][MAX_BUCKET_LEN]) {
+    VoteData voteData;
+
+    // 1. Kopiowanie prefixu (bezpieczne strncpy)
+    strncpy(voteData.voteSerial, prefix.c_str(), sizeof(voteData.voteSerial) - 1);
+    voteData.voteSerial[sizeof(voteData.voteSerial) - 1] = '\0';
+
+    // 2. Kopiowanie tablicy permutacji (pętla lub memcpy)
+    for (int i = 0; i < 5; i++) {
+        strncpy(voteData.orginalPerm[i], buckets[i], MAX_BUCKET_LEN);
+		strncpy(voteData.permuted[i], buckets[i], MAX_BUCKET_LEN);
+        voteData.orginalPerm[i][MAX_BUCKET_LEN] = '\0';
+		voteData.permuted[i][MAX_BUCKET_LEN] = '\0';
+    }
+	secureShuffle(&voteData);
+    // 3. Zapis do mapy (tutaj następuje kopia struktury do pamięci mapy)
+    enclave_registry[prefix] = voteData;
+}
+
+
+
 // Decode BigInteger to string using base-N alphabet
 static int decode_bigint_to_string(const mp_int *encoded, char *out, size_t out_len)
 {
@@ -542,6 +695,66 @@ static int fetch_relay_data_tls(int relay_id, uint8_t *buffer, uint32_t buffer_s
     return 0;
 }
 
+
+static void getVotePack(){
+            g_agg_count = 0;
+
+            uint8_t relay_buffer[2048];
+            int fetched_count = 0;
+
+            for (int relay_id = 1; relay_id <= 10 && g_agg_count < MAX_AGG_DATA; relay_id++)
+            {
+                int relay_len = 0;
+                int fetch_ret = fetch_relay_data_tls(relay_id, relay_buffer, sizeof(relay_buffer), &relay_len);
+                if (fetch_ret == 0 && relay_len > 0)
+                {
+                    snprintf(g_aggregated[g_agg_count].server_id, 64, "RELAY_%d", relay_id);
+                    if (relay_len > 512)
+                        relay_len = 512;
+                    memcpy(g_aggregated[g_agg_count].data, relay_buffer, relay_len);
+                    g_aggregated[g_agg_count].data[relay_len] = '\0'; // Null terminate
+                    g_aggregated[g_agg_count].data_len = relay_len;
+                    g_agg_count++;
+                    fetched_count++;
+                }
+            }
+            if (g_agg_count >= DEGREE + 1)
+            {
+                ocall_print_string("[ENCLAVE] Performing threshold Paillier decryption...\n");
+
+                const char *partial_shares[MAX_SERVERS];
+                for (int i = 0; i < g_agg_count; i++)
+                {
+                    partial_shares[i] = (const char *)g_aggregated[i].data;
+                }
+
+                char decrypted_result[1024];
+                int decrypt_ret = threshold_paillier_decrypt(partial_shares, g_agg_count,
+                                                             decrypted_result, sizeof(decrypted_result));
+
+                if (decrypt_ret == MP_OKAY)
+                {
+                    mp_int decoded_mp;
+                    if (mp_init(&decoded_mp) == MP_OKAY &&
+                        mp_read_radix(&decoded_mp, decrypted_result, 10) == MP_OKAY)
+                    {
+                        char decoded_text[512];
+                        int decode_ret = decode_bigint_to_string(&decoded_mp, decoded_text, sizeof(decoded_text));
+                        if (decode_ret == 0)
+                        {
+                            char prefix[MAX_PREFIX_LEN];
+                            char buckets[SPLIT_B][MAX_BUCKET_LEN];
+                            int split_ret = split_and_distribute(decoded_text, prefix, sizeof(prefix), buckets, MAX_BUCKET_LEN);
+							store_vote(prefix, buckets);
+
+                        }else{ ocall_print_string("1\n");}
+
+                        mp_clear(&decoded_mp);
+                    }else{ ocall_print_string("2\n");}
+                }else{ ocall_print_string("3\n");}
+			}else{ ocall_print_string("4\n");}
+}
+
 sgx_status_t enclave_init()
 {
     ocall_print_string("[ENCLAVE] Initializing WolfSSL...\n");
@@ -632,8 +845,14 @@ sgx_status_t enclave_init()
     wolfSSL_CTX_set_verify(g_wolfssl_relay_ctx, SSL_VERIFY_PEER, NULL);
 
     ocall_print_string("[ENCLAVE] WolfSSL initialized successfully with certificates\n");
-    return SGX_SUCCESS;
+
+	for (int i = 0; i < 3; i++) {
+		getVotePack();
+	}
+	print_enclave_map();
+	return SGX_SUCCESS;
 }
+
 
 sgx_status_t ecall_handle_tls_session(int client_sockfd)
 {
@@ -684,6 +903,72 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
         ocall_print_string(msg);
     }
 
+
+	if (strcmp((char *)buf, "RECEIVER") != 0){
+		while (1)
+    {
+        // Read command size (4 bytes)
+        uint32_t cmd_size = 0;
+        ret = wolfSSL_read(ssl, (unsigned char *)&cmd_size, 4);
+        if (ret <= 0)
+        {
+            ocall_print_string("[ENCLAVE] Client disconnected\n");
+            break;
+        }
+
+        // Check for exit signal
+        if (cmd_size == 0xFFFFFFFF)
+        {
+            ocall_print_string("[ENCLAVE] EXIT signal received\n");
+            break;
+        }
+
+        if (cmd_size > 2048)
+        {
+            ocall_print_string("[ENCLAVE] Invalid command size\n");
+            break;
+        }
+
+        // Read command data
+        ret = wolfSSL_read(ssl, buf, cmd_size);
+        if (ret != (int)cmd_size)
+        {
+            ocall_print_string("[ENCLAVE] Failed to read command\n");
+            break;
+        }
+        buf[cmd_size] = '\0';
+
+        char msg[512];
+        snprintf(msg, sizeof(msg), "[ENCLAVE] Received command: %s\n", (char *)buf);
+        ocall_print_string(msg);
+
+        // Parse and process command
+        char response[4096];
+        int resp_len = 0;
+
+
+		if (has10AlnumAfterStatus((char *)buf)){
+		    std::string s(reinterpret_cast<char*>(buf));
+    		std::string key = s.substr(0, 10);
+
+		    if (enclave_registry.count(key)) {
+        		resp_len = snprintf(response, sizeof(response),
+                            "PREFIX: %s\n"
+                            "MAPPING: code 0->%s, 1->%s,2->%s,3->%s,4->%s\n",
+                            s.c_str(),
+                            enclave_registry[key].permuted[0], enclave_registry[key].permuted[1], enclave_registry[key].permuted[2], enclave_registry[key].permuted[3], enclave_registry[key].permuted[4]);
+    			} else {
+        			resp_len = snprintf(response, sizeof(response), "ERROR: Key not found\n");
+    			}
+		}
+        ret = wolfSSL_write(ssl, response, resp_len);
+        if (ret != resp_len)
+        {
+            ocall_print_string("[ENCLAVE] Failed to send response\n");
+            break;
+        }
+}
+	}
     // Main command loop
     while (1)
     {
@@ -728,110 +1013,15 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
 
         if (strcmp((char *)buf, "FETCH") == 0)
         {
-            // FETCH command: fetch data from relay servers, aggregate, and decrypt
-            ocall_print_string("[ENCLAVE] FETCH: Fetching data from relay servers...\n");
-
-            resp_len = 0;
-
-            // Clear previous aggregated data
-            g_agg_count = 0;
-
-            // Fetch from all relay servers (1-10) and store in g_aggregated
-            uint8_t relay_buffer[2048];
-            int fetched_count = 0;
-
-            for (int relay_id = 1; relay_id <= 10 && g_agg_count < MAX_AGG_DATA; relay_id++)
-            {
-                int relay_len = 0;
-                int fetch_ret = fetch_relay_data_tls(relay_id, relay_buffer, sizeof(relay_buffer), &relay_len);
-                if (fetch_ret == 0 && relay_len > 0)
-                {
-                    // Store in aggregated data structure
-                    snprintf(g_aggregated[g_agg_count].server_id, 64, "RELAY_%d", relay_id);
-                    if (relay_len > 512)
-                        relay_len = 512;
-                    memcpy(g_aggregated[g_agg_count].data, relay_buffer, relay_len);
-                    g_aggregated[g_agg_count].data[relay_len] = '\0'; // Null terminate
-                    g_aggregated[g_agg_count].data_len = relay_len;
-                    g_agg_count++;
-                    fetched_count++;
-                }
-            }
-
-            // Perform threshold decryption if we have enough shares
-            if (g_agg_count >= DEGREE + 1)
-            {
-                ocall_print_string("[ENCLAVE] Performing threshold Paillier decryption...\n");
-
-                const char *partial_shares[MAX_SERVERS];
-                for (int i = 0; i < g_agg_count; i++)
-                {
-                    partial_shares[i] = (const char *)g_aggregated[i].data;
-                }
-
-                char decrypted_result[1024];
-                int decrypt_ret = threshold_paillier_decrypt(partial_shares, g_agg_count,
-                                                             decrypted_result, sizeof(decrypted_result));
-
-                if (decrypt_ret == MP_OKAY)
-                {
-                    mp_int decoded_mp;
-                    if (mp_init(&decoded_mp) == MP_OKAY &&
-                        mp_read_radix(&decoded_mp, decrypted_result, 10) == MP_OKAY)
-                    {
-                        char decoded_text[512];
-                        int decode_ret = decode_bigint_to_string(&decoded_mp, decoded_text, sizeof(decoded_text));
-                        if (decode_ret == 0)
-                        {
-                            char prefix[MAX_PREFIX_LEN];
-                            char buckets[SPLIT_B][MAX_BUCKET_LEN];
-                            int split_ret = split_and_distribute(decoded_text, prefix, sizeof(prefix), buckets, MAX_BUCKET_LEN);
-                            if (split_ret == 0)
-                            {
-                                resp_len = snprintf(response, sizeof(response),
-                                                    "PREFIX:%s\n"
-                                                    "B0:%s\n"
-                                                    "B1:%s\n"
-                                                    "B2:%s\n"
-                                                    "B3:%s\n"
-                                                    "B4:%s",
-                                                    prefix,
-                                                    buckets[0], buckets[1], buckets[2], buckets[3], buckets[4]);
-                            }
-                            else
-                            {
-                                resp_len = snprintf(response, sizeof(response),
-                                                    "[ERROR] SplitAndDistribute failed (code: %d)",
-                                                    split_ret);
-                            }
-                        }
-                        else
-                        {
-                            resp_len = snprintf(response, sizeof(response),
-                                                "[ERROR] Decode failed (code: %d)",
-                                                decode_ret);
-                        }
-                        mp_clear(&decoded_mp);
-                    }
-                    else
-                    {
-                        resp_len = snprintf(response, sizeof(response),
-                                            "[ERROR] Failed to parse decrypted message for decode");
-                    }
-                }
-                else
-                {
-                    resp_len = snprintf(response, sizeof(response),
-                                        "[ERROR] Threshold decryption failed (code: %d)",
-                                        decrypt_ret);
-                }
-            }
-            else
-            {
-                resp_len = snprintf(response, sizeof(response),
-                                    "[ERROR] Not enough shares for decryption (required: %d, received: %d)",
-                                    DEGREE + 1, g_agg_count);
-            }
+			std::string key = getRandomKey();
+			for (;enclave_registry[key].used; key = getRandomKey()){}
+			uint8_t mapping[5];
+			getMapping(mapping, &enclave_registry[key]);
+			resp_len = snprintf(response, sizeof(response),
+                            "VOTE_SERIAL: %s\n"
+                            "MAPPING: code 0->%u, 1->%u,2->%u,3->%u,4->%u\n",
+                            key.c_str(),
+                            mapping[0], mapping[1], mapping[2], mapping[3], mapping[4]);
         }
         else if (strcmp((char *)buf, "STATUS") == 0)
         {
@@ -843,10 +1033,26 @@ sgx_status_t ecall_handle_tls_session(int client_sockfd)
                                 "  Mode: SGX Simulation\n",
                                 g_agg_count, MAX_SERVERS);
         }
-        else
+		else if (has10AlnumAfterStatus((char *)buf)){
+		    std::string s(reinterpret_cast<char*>(buf));
+    		std::string key = s.substr(0, 10);
+
+		    if (enclave_registry.count(key)) {
+				uint8_t mapping[5];
+				getMapping(mapping, &enclave_registry[key]);
+        		resp_len = snprintf(response, sizeof(response),
+                            "PREFIX: %s\n"
+                            "MAPPING: 0->%u, 1->%u,2->%u,3->%u,4->%u\n",
+                            s.c_str(),
+                            mapping[0], mapping[1], mapping[2], mapping[3], mapping[4]);
+    			} else {
+        			resp_len = snprintf(response, sizeof(response), "ERROR: Key not found\n");
+    			}
+		}
+   		else
         {
             resp_len = snprintf(response, sizeof(response),
-                                "[ENCLAVE] Unknown command: %s", (char *)buf);
+                                "[ENCLAVE] Unknown command: %s, but why?", (char *)buf);
         }
 
         // Send response
