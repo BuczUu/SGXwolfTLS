@@ -14,6 +14,17 @@
 #define SERVER_HOST "127.0.0.1"
 #define SERVER_PORT 12345
 
+
+bool has10AlnumAfterStatus(const char* buf) {
+    // 2. Sprawdź czy kolejne 10 znaków (od indeksu 6 do 15) są alfanumeryczne
+    for (int i = 0; i < 10; i++) {
+        if (!isalnum(static_cast<unsigned char>(buf[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int main(int argc, char *argv[])
 {
     printf("=== DistributionVC Receiver Client (Simple) ===\n");
@@ -125,8 +136,7 @@ int main(int argc, char *argv[])
     printf("[RECEIVER] TLS handshake OK\n");
 
     /* Send client identification */
-    const char *client_id = "RECEIVER";
-    ret = wolfSSL_write(ssl, (unsigned char *)client_id, strlen(client_id));
+    ret = wolfSSL_write(ssl, (unsigned char *)argv[3], strlen(argv[3]));
     if (ret <= 0)
     {
         printf("[RECEIVER] Failed to send identification\n");
@@ -179,6 +189,38 @@ int main(int argc, char *argv[])
             printf("[RECEIVER] Fetching + decrypting data from SGX enclave...\n");
             const char *cmd = "FETCH";
             uint32_t cmd_len = strlen(cmd);
+
+            ret = wolfSSL_write(ssl, (unsigned char *)&cmd_len, 4);
+            if (ret != 4)
+            {
+                printf("[RECEIVER] Failed to send command size\n");
+                break;
+            }
+
+            ret = wolfSSL_write(ssl, (unsigned char *)cmd, cmd_len);
+            if (ret != (int)cmd_len)
+            {
+                printf("[RECEIVER] Failed to send command\n");
+                break;
+            }
+
+            /* Receive response with data from relay servers */
+            ret = wolfSSL_read(ssl, response, sizeof(response) - 1);
+            if (ret > 0)
+            {
+                response[ret] = '\0';
+                printf("\n[RECEIVED FROM SGX]:\n");
+                printf("%s\n\n", (char *)response);
+            }
+            else
+            {
+                printf("[RECEIVER] Failed to receive response (ret=%d)\n", ret);
+            }
+        }
+        else if (has10AlnumAfterStatus(input)){
+            /* Send FETCH command to SGX */
+            const char *cmd = input;
+            uint32_t cmd_len = strlen(input);
 
             ret = wolfSSL_write(ssl, (unsigned char *)&cmd_len, 4);
             if (ret != 4)
